@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lista de Tareas Simple</title>
+    <!-- Carga de Tailwind CSS para un diseño moderno y responsive -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Fuente Inter para un look limpio */
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
+        /* Estilo para las tarjetas de tareas */
+        .task-item {
+            transition: all 0.3s ease;
+        }
+        .task-item:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div id="appContainer" class="min-h-screen p-4 md:p-8 flex items-start justify-center">
+        <div class="w-full max-w-xl bg-white p-6 md:p-8 rounded-xl shadow-2xl">
+            <h1 class="text-4xl font-extrabold text-gray-900 mb-2">Lista de Tareas</h1>
+            <p class="text-sm text-gray-500 mb-6">Tu administrador de tareas en tiempo real (tecnología simple).</p>
+
+            <!-- Información del Usuario y Estado de Carga -->
+            <div class="mb-4 p-3 bg-indigo-50 rounded-lg border border-indigo-200 text-sm">
+                <p class="font-medium text-indigo-700">Estado de la App:</p>
+                <div id="loadingStatus" class="text-xs text-indigo-600">Inicializando...</div>
+                <div id="userIdDisplay" class="text-xs text-indigo-600 mt-1 break-all">ID de Usuario: Cargando...</div>
+            </div>
+
+            <!-- Formulario para agregar nuevas tareas -->
+            <form id="taskForm" class="flex gap-2 mb-8">
+                <input type="text" id="taskInput" placeholder="Escribe una nueva tarea..." required
+                       class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+                <button type="submit"
+                        class="px-4 py-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 transform hover:scale-105">
+                    + Añadir
+                </button>
+            </form>
+
+            <!-- Lista de Tareas (donde se renderizarán) -->
+            <div id="taskList" class="space-y-3">
+                <!-- Las tareas se inyectarán aquí por JavaScript -->
+            </div>
+
+            <p id="emptyMessage" class="text-center text-gray-400 mt-10 hidden">¡No hay tareas pendientes! 🎉</p>
+        </div>
+    </div>
+
+    <!-- Script de Firebase (Módulo) -->
+    <script type="module">
+        // Importaciones de Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, deleteDoc, doc, Timestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Establecer el nivel de registro (útil para depuración)
+        setLogLevel('Debug');
+
+        // Variables globales proporcionadas por el entorno
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        const loadingStatusEl = document.getElementById('loadingStatus');
+        const userIdDisplayEl = document.getElementById('userIdDisplay');
+        const taskListEl = document.getElementById('taskList');
+        const taskFormEl = document.getElementById('taskForm');
+        const taskInputEl = document.getElementById('taskInput');
+        const emptyMessageEl = document.getElementById('emptyMessage');
+
+        // Función para inicializar Firebase y autenticar al usuario
+        async function initApp() {
+            if (!firebaseConfig) {
+                loadingStatusEl.textContent = 'ERROR: No se encontró la configuración de Firebase.';
+                return;
+            }
+
+            try {
+                loadingStatusEl.textContent = 'Inicializando Firebase...';
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Autenticación: usar token personalizado si está disponible, sino, anónima
+                loadingStatusEl.textContent = 'Autenticando usuario...';
+                
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Esperar a que el estado de autenticación cambie
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        userIdDisplayEl.textContent = `ID de Usuario: ${userId}`;
+                        loadingStatusEl.textContent = 'Listo. Sincronizando tareas...';
+                        setupRealtimeListener(userId);
+                        taskFormEl.addEventListener('submit', addTask);
+                    } else {
+                        // Esto no debería suceder si signInWithCustomToken o signInAnonymously tienen éxito
+                        loadingStatusEl.textContent = 'ERROR: No se pudo autenticar al usuario.';
+                        userIdDisplayEl.textContent = 'ID de Usuario: N/A';
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error en la inicialización o autenticación:", error);
+                loadingStatusEl.textContent = `ERROR FATAL: ${error.message}`;
+            }
+        }
+
+        // Función para configurar el listener de datos en tiempo real (onSnapshot)
+        function setupRealtimeListener(currentUserId) {
+            if (!db || !currentUserId) return;
+
+            // Ruta de la colección privada: /artifacts/{appId}/users/{userId}/tareas
+            const collectionPath = `artifacts/${appId}/users/${currentUserId}/tareas`;
+            const q = query(collection(db, collectionPath));
+            
+            // onSnapshot para escuchar cambios en tiempo real
+            onSnapshot(q, (snapshot) => {
+                const tasks = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    tasks.push({
+                        id: doc.id,
+                        text: data.text,
+                        createdAt: data.createdAt ? data.createdAt.toDate() : new Date(0)
+                    });
+                });
+                
+                // Ordenar tareas por fecha de creación (más nuevas primero)
+                tasks.sort((a, b) => b.createdAt - a.createdAt);
+                
+                renderTasks(tasks);
+            }, (error) => {
+                console.error("Error al obtener tareas en tiempo real:", error);
+                loadingStatusEl.textContent = `Error de sincronización: ${error.message}`;
+            });
+        }
+
+        // Función para añadir una nueva tarea
+        async function addTask(event) {
+            event.preventDefault();
+            if (!isAuthReady || !db) return;
+
+            const text = taskInputEl.value.trim();
+            if (text === "") return;
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/tareas`;
+                await addDoc(collection(db, collectionPath), {
+                    text: text,
+                    createdAt: Timestamp.now(), // Usar un timestamp para ordenar
+                    completed: false
+                });
+                taskInputEl.value = ''; // Limpiar input
+            } catch (error) {
+                console.error("Error al añadir tarea:", error);
+                // Mostrar un mensaje de error simple al usuario si es necesario
+            }
+        }
+
+        // Función para eliminar una tarea
+        async function deleteTask(taskId) {
+            if (!isAuthReady || !db) return;
+
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/tareas/${taskId}`;
+                await deleteDoc(doc(db, docPath));
+            } catch (error) {
+                console.error("Error al eliminar tarea:", error);
+                // Mostrar un mensaje de error
+            }
+        }
+
+        // Función para renderizar la lista de tareas en el DOM
+        function renderTasks(tasks) {
+            taskListEl.innerHTML = ''; // Limpiar lista actual
+
+            if (tasks.length === 0) {
+                emptyMessageEl.classList.remove('hidden');
+                return;
+            }
+            emptyMessageEl.classList.add('hidden');
+
+            tasks.forEach(task => {
+                const taskDiv = document.createElement('div');
+                taskDiv.className = 'task-item flex items-center justify-between p-3 bg-gray-50 rounded-lg shadow-sm border border-gray-200';
+                
+                taskDiv.innerHTML = `
+                    <span class="text-gray-800 flex-1 truncate pr-2">${task.text}</span>
+                    <button class="delete-btn text-red-500 hover:text-red-700 p-1 rounded-full transition duration-150 ml-2" data-id="${task.id}" title="Eliminar Tarea">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                `;
+
+                // Añadir el listener de eliminación
+                taskDiv.querySelector('.delete-btn').addEventListener('click', (e) => {
+                    const taskId = e.currentTarget.dataset.id;
+                    deleteTask(taskId);
+                });
+
+                taskListEl.appendChild(taskDiv);
+            });
+        }
+
+        // Iniciar la aplicación al cargar la ventana
+        window.onload = initApp;
+
+    </script>
+</body>
+</html>
